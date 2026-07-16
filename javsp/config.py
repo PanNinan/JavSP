@@ -34,6 +34,7 @@ class CrawlerID(str, Enum):
     javlib = 'javlib'
     javmenu = 'javmenu'
     mgstage = 'mgstage'
+    missav = 'missav'
     njav = 'njav'
     prestige = 'prestige'
     arzon = 'arzon'
