@@ -11,7 +11,7 @@
 2) 代理使用脚本内的默认设置 DEFAULT_PROXY，无需输入
 
 依赖:
-    pip install playwright beautifulsoup4 lxml cloudscraper requests
+    pip install playwright beautifulsoup4 lxml curl_cffi requests
     python -m playwright install chromium
 """
 
@@ -26,6 +26,8 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
+from javsp.config import Cfg
+
 # 可选模块，按可用性启用
 try:
     from playwright.sync_api import sync_playwright
@@ -35,20 +37,23 @@ except Exception:
     PLAYWRIGHT_AVAILABLE = False
 
 try:
-    import cloudscraper
+    from curl_cffi import requests as curl_requests
 
-    CLOUDSCRAPER_AVAILABLE = True
+    CURL_CFFI_AVAILABLE = True
 except Exception:
-    CLOUDSCRAPER_AVAILABLE = False
+    CURL_CFFI_AVAILABLE = False
 
 import requests
+
+# 标记上一次 curl_cffi 请求是否命中 Cloudflare 挑战，供 main() 决定是否回退 playwright
+LAST_CURL_WAS_CF = False
 
 # ===================== 配置区 =====================
 MISSAV_HOST = "https://missav.ai"
 SEARCH_TEMPLATE = "https://missav.ai/ja/search/{keyword}"
 
 # ✅ 默认代理：改成你的实际代理地址；若不想用代理，留空字符串""即可
-DEFAULT_PROXY = "http://127.0.0.1:7890"  # ←←← 修改这里
+DEFAULT_PROXY = Cfg().network.proxy_server  # ←←← 修改这里
 
 # （暂时无效）如果你想优先使用系统环境变量代理，把下方开关设为 True
 USE_ENV_PROXY_IF_SET = True
@@ -140,6 +145,22 @@ def pick_first_target(links: List[str], keyword: str) -> Optional[str]:
     return None
 
 
+def is_cloudflare_challenge(html: str) -> bool:
+    """判断页面是否是 Cloudflare 的「Just a moment...」托管式 JS 挑战页。"""
+    if not html:
+        return False
+    t = html.lower()
+    markers = [
+        "just a moment",
+        "cf-mitigated",
+        "challenge-platform",
+        "verify you are human",
+        "attention required",
+        "why am i seeing this",
+    ]
+    return any(m in t for m in markers)
+
+
 def extract_links_from_html(html: str) -> List[str]:
     soup = BeautifulSoup(html, "lxml")
     links = [a.get("href", "").strip() for a in soup.select("a[href]")]
@@ -155,7 +176,24 @@ def save_cache(html: str, keyword: str, suffix: str) -> pathlib.Path:
     return out
 
 
-# ---------------- 方案一：Playwright ----------------
+def _goto_with_retry(page, url: str, retries: int = 3, wait: str = "domcontentloaded", timeout: int = 60000):
+    """带重试的页面跳转。代理偶发 RST（ERR_CONNECTION_CLOSED）时自动重试，提升在抖动网络下的成功率。"""
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            page.goto(url, wait_until=wait, timeout=timeout)
+            return True
+        except Exception as e:
+            last_err = e
+            log(f"[PW] goto 第 {attempt}/{retries} 次失败：{e}")
+            if attempt < retries:
+                time.sleep(2)
+    if last_err:
+        raise last_err
+    return False
+
+
+# ---------------- 方案一：Playwright（真浏览器，用于绕过 Cloudflare JS 挑战） ----------------
 def fetch_with_playwright(search_url: str, keyword: str, proxies: Optional[dict]) -> Optional[str]:
     if not PLAYWRIGHT_AVAILABLE:
         log("Playwright 不可用，跳过方案一。")
@@ -168,8 +206,26 @@ def fetch_with_playwright(search_url: str, keyword: str, proxies: Optional[dict]
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, proxy=pw_proxy)
-            context = browser.new_context(locale="ja-JP", user_agent=_ua())
+            # 反 headless 检测：去掉 AutomationControlled 特征，禁用 /dev/shm 共享内存（容器环境更稳定）
+            browser = p.chromium.launch(
+                headless=True,
+                proxy=pw_proxy,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-infobars",
+                ],
+            )
+            context = browser.new_context(
+                locale="ja-JP",
+                user_agent=_ua(),
+                ignore_https_errors=True,
+            )
+            # 覆盖 navigator.webdriver，进一步规避 Cloudflare 的 headless 指纹
+            context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            )
             page = context.new_page()
             page.set_extra_http_headers({
                 "Accept-Language": "ja,en;q=0.9,zh;q=0.8",
@@ -178,14 +234,29 @@ def fetch_with_playwright(search_url: str, keyword: str, proxies: Optional[dict]
             })
 
             log(f"[PW] 打开搜索页：{search_url}")
-            page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+            _goto_with_retry(page, search_url, retries=3, wait="domcontentloaded", timeout=60000)
+
+            # 关键：等待 Cloudflare 的「Just a moment...」挑战解完（标题不再是挑战页）
+            # 挑战页标题为 "Just a moment..."，解出后会跳转到真实页面，标题随之改变
+            try:
+                page.wait_for_function(
+                    "() => { const t = document.title; return !t || t.toLowerCase().indexOf('just a moment') === -1; }",
+                    timeout=30000,
+                )
+                log("[PW] Cloudflare 挑战已通过，等待页面稳定。")
+            except Exception as e:
+                log(f"[PW] 等待 CF 挑战超时（仍可能是挑战页）：{e}")
             page.wait_for_timeout(1500)
-            # 滚动触发懒加载/通过CF
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(1200)
 
             search_html = page.content()
             save_cache(search_html, keyword, "search")
+
+            # 若仍是挑战页，则本次未成功绕过
+            if is_cloudflare_challenge(search_html):
+                log("[PW] 警告：缓存的搜索页仍是 Cloudflare 挑战页，可能无法取到有效链接。")
+                context.close()
+                browser.close()
+                return None
 
             links = extract_links_from_html(search_html)
             # 兜底：文本里再扫一轮直链
@@ -199,7 +270,14 @@ def fetch_with_playwright(search_url: str, keyword: str, proxies: Optional[dict]
                 return None
 
             log(f"[PW] 发现目标链接：{target}")
-            page.goto(target, wait_until="domcontentloaded", timeout=60000)
+            _goto_with_retry(page, target, retries=3, wait="domcontentloaded", timeout=60000)
+            try:
+                page.wait_for_function(
+                    "() => { const t = document.title; return !t || t.toLowerCase().indexOf('just a moment') === -1; }",
+                    timeout=30000,
+                )
+            except Exception:
+                pass
             page.wait_for_timeout(1500)
             detail_html = page.content()
             save_cache(detail_html, keyword, "detail")
@@ -214,16 +292,17 @@ def fetch_with_playwright(search_url: str, keyword: str, proxies: Optional[dict]
         return None
 
 
-# --------------- 方案二：cloudscraper/requests ---------------
-def fetch_with_requests(search_url: str, keyword: str, proxies: Optional[dict]) -> Optional[str]:
-    if CLOUDSCRAPER_AVAILABLE:
-        sess = cloudscraper.create_scraper(
-            browser={"browser": "chrome", "platform": "windows", "mobile": False}
-        )
-        log("[REQ] 使用 cloudscraper。")
+# --------------- 方案二：curl_cffi（模拟 Chrome TLS 指纹绕过 Cloudflare） ---------------
+def fetch_with_curl(search_url: str, keyword: str, proxies: Optional[dict]) -> Optional[str]:
+    global LAST_CURL_WAS_CF
+    if CURL_CFFI_AVAILABLE:
+        # impersonate="chrome" 让 curl_cffi 复刻 Chrome 的 TLS/JA3 指纹（含扩展、曲线、ALPN 顺序），
+        # 相比 cloudscraper 更接近真实浏览器，能更稳地通过 Cloudflare 的 TLS 指纹检测
+        sess = curl_requests.Session(impersonate="chrome")
+        log("[REQ] 使用 curl_cffi（模拟 Chrome TLS 指纹）。")
     else:
         sess = requests.Session()
-        log("[REQ] 使用 requests。")
+        log("[REQ] 使用 requests（未检测到 curl_cffi）。")
 
     if proxies:
         sess.proxies.update(proxies)
@@ -239,6 +318,11 @@ def fetch_with_requests(search_url: str, keyword: str, proxies: Optional[dict]) 
     try:
         log(f"[REQ] 打开搜索页：{search_url}")
         r = sess.get(search_url, timeout=60)
+        # 命中 Cloudflare 挑战（403 或挑战页正文）：标记后回退 playwright，不在此硬解
+        if r.status_code == 403 or is_cloudflare_challenge(r.text):
+            LAST_CURL_WAS_CF = True
+            log("[REQ] 命中 Cloudflare 挑战，将回退 playwright 解挑战。")
+            return None
         r.raise_for_status()
         search_html = r.text
         save_cache(search_html, keyword, "search")
@@ -254,6 +338,10 @@ def fetch_with_requests(search_url: str, keyword: str, proxies: Optional[dict]) 
 
         log(f"[REQ] 发现目标链接：{target}")
         r2 = sess.get(target, timeout=60)
+        if r2.status_code == 403 or is_cloudflare_challenge(r2.text):
+            LAST_CURL_WAS_CF = True
+            log("[REQ] 详情页也命中 Cloudflare 挑战，将回退 playwright。")
+            return None
         r2.raise_for_status()
         detail_html = r2.text
         save_cache(detail_html, keyword, "detail")
@@ -284,6 +372,7 @@ def get_keyword_from_argv_or_input() -> Optional[str]:
 
 
 def main():
+    global LAST_CURL_WAS_CF
     try:
         keyword = get_keyword_from_argv_or_input()
         if not keyword:
@@ -295,12 +384,15 @@ def main():
 
         proxies = build_proxies()
 
-        target_url = None
-        if PLAYWRIGHT_AVAILABLE:
-            target_url = fetch_with_playwright(search_url, keyword, proxies)
+        # 首选 curl_cffi（模拟 Chrome TLS 指纹，速度快）；任何原因失败时（含 Cloudflare 挑战、TLS 异常）
+        # 一律回退 playwright 真浏览器解挑战，作为可靠兜底
+        LAST_CURL_WAS_CF = False
+        target_url = fetch_with_curl(search_url, keyword, proxies)
 
-        if not target_url:
-            target_url = fetch_with_requests(search_url, keyword, proxies)
+        if (target_url is None) and PLAYWRIGHT_AVAILABLE:
+            reason = "命中 Cloudflare 挑战" if LAST_CURL_WAS_CF else "curl_cffi 请求失败"
+            log(f"[MAIN] {reason}，回退 playwright 真浏览器解挑战。")
+            target_url = fetch_with_playwright(search_url, keyword, proxies)
 
         if target_url:
             log(f"完成。目标链接：{target_url}")

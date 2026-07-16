@@ -91,6 +91,10 @@ def parse_data(movie: MovieInfo):
                 if d is urls[-1]:
                     logger.warning(f"在fanza查找到的cid={movie.cid}的影片页面均解析失败")
                     raise
+    elif r0.history:
+        # 被重定向（如跳转到 video.dmm.co.jp）说明当前IP被地区限制或未完成年龄认证，
+        # 页面已不是影片详情页，继续解析只会触发 xpath 越界，这里直接给出明确报错
+        raise SiteBlocked('FANZA不允许从当前IP所在地区访问，或需要日本IP才能完成年龄认证，请更换为日本地区代理')
     else:
         html = resp2html_wrapper(r0)
         parse_videoa_page(movie, html)

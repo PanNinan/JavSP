@@ -12,6 +12,17 @@ logger = logging.getLogger(__name__)
 base_url = 'https://mrzyx.xyz'
 
 
+def _info_field(info, label):
+    """在 card-body 中按 label 文本定位到紧随其后的兄弟节点，返回其合并文本（未找到返回 None）"""
+    spans = info.xpath(f"div/span[contains(text(), '{label}')]")
+    if not spans:
+        return None
+    nxt = spans[0].getnext()
+    if nxt is None:
+        return None
+    return ''.join(nxt.xpath(".//text()")).strip()
+
+
 def parse_data(movie: MovieInfo):
     """从网页抓取并解析指定番号的数据
     Args:
@@ -25,28 +36,40 @@ def parse_data(movie: MovieInfo):
         raise MovieNotFoundError(__name__, movie.dvdid)
 
     html = resp2html(r)
-    container = html.xpath("//div[@class='col-md-9 px-0']")[0]
-    title = container.xpath("div[@class='col-12 mb-3']/h1/strong/text()")[0]
-    # 竟然还在标题里插广告，真的疯了。要不是我已经写了抓取器，才懒得维护这个破站
-    title = title.replace('  | JAV目錄大全 | 每日更新', '')
-    title = title.replace(' 免費在線看', '').replace(' 免費AV在線看', '')
+    # 站点改版后容器 class 由 'col-md-9 px-0' 变为 'col-md-9 px-1 px-md-0'，用 contains 匹配更稳健
+    container = html.xpath("//div[contains(@class, 'col-md-9')]")
+    if not container:
+        raise MovieNotFoundError(__name__, movie.dvdid)
+    container = container[0]
+    title_tag = container.xpath("//h1[@class='display-5']/strong/text()")
+    if not title_tag:
+        raise MovieNotFoundError(__name__, movie.dvdid)
+    # 标题里竟然还插广告，真的疯了。要不是我已经写了抓取器，才懒得维护这个破站
+    title = title_tag[0]
+    for ad in ['  | JAV目錄大全 | 每日更新', ' 免費在線看', ' 免費AV在線看',
+               '| JAV目錄大全 | 每日更新', '免費在線看', '免費AV在線看']:
+        title = title.replace(ad, '')
+    # 封面：改版后 single-video 内由 <video> 变成了 <img>（data-poster 失效），直接取 img 的 src
     cover_tag = container.xpath("//div[@class='single-video']")
-    if len(cover_tag) > 0:
-        video_tag = cover_tag[0].find('video')
-        # URL首尾竟然也有空格……
-        movie.cover = video_tag.get('data-poster').strip()
-        # 预览影片改为blob了，无法获取
-        # movie.preview_video = video_tag.find('source').get('src').strip()
-    else:
+    cover = ''
+    if cover_tag:
+        img = cover_tag[0].xpath(".//img/@src")
+        if img:
+            cover = img[0].strip()
+    if not cover:
         cover_img_tag = container.xpath("//img[@class='lazy rounded']/@data-src")
         if cover_img_tag:
-            movie.cover = cover_img_tag[0].strip()
-    info = container.xpath("//div[@class='card-body']")[0]
-    publish_date = info.xpath("div/span[contains(text(), '日期:')]")[0].getnext().text
-    duration = info.xpath("div/span[contains(text(), '時長:')]")[0].getnext().text.replace('分鐘', '')
-    producer = info.xpath("div/span[contains(text(), '製作:')]/following-sibling::a/span/text()")
-    if producer:
-        movie.producer = producer[0]
+            cover = cover_img_tag[0].strip()
+    info = container.xpath("//div[@class='card-body']")
+    if not info:
+        raise MovieNotFoundError(__name__, movie.dvdid)
+    info = info[0]
+    # 信息区字段改为“标签 + 兄弟节点”结构（發佈於/時長/製作/女優/類別）
+    publish_date = _info_field(info, '發佈於')
+    duration = _info_field(info, '時長')
+    if duration:
+        duration = duration.replace('分鐘', '').strip()
+    producer = _info_field(info, '製作')
     genre_tags = info.xpath("//a[@class='genre']")
     genre, genre_id = [], []
     for tag in genre_tags:
@@ -63,9 +86,10 @@ def parse_data(movie: MovieInfo):
         movie.magnet = [i.replace('[javdb.com]','') for i in magnet_links]
     preview_pics = container.xpath("//a[@data-fancybox='gallery']/@href")
 
-    if (not movie.cover) and preview_pics:
-        movie.cover = preview_pics[0]
+    if (not cover) and preview_pics:
+        cover = preview_pics[0]
     movie.url = url
+    movie.cover = cover
     movie.title = title.replace(movie.dvdid, '').strip()
     movie.preview_pics = preview_pics
     movie.publish_date = publish_date
@@ -73,6 +97,8 @@ def parse_data(movie: MovieInfo):
     movie.genre = genre
     movie.genre_id = genre_id
     movie.actress = actress
+    if producer:
+        movie.producer = producer
 
 
 if __name__ == "__main__":

@@ -28,7 +28,11 @@ def parse_data(movie: MovieInfo):
 
     html = resp2html(resp)
     # mgstage的文本中含有大量的空白字符（'\n \t'），需要使用strip去除
-    title = html.xpath("//div[@class='common_detail_cover']/h1/text()")[0].strip()
+    title_tags = html.xpath("//div[@class='common_detail_cover']/h1/text()")
+    if not title_tags:
+        # 返回的可能是“成人認証”年龄验证页而非影片页，说明当前IP未完成年龄认证
+        raise SiteBlocked('mgstage 需要日本IP完成年龄认证(成人認証)，请更换为日本地区代理')
+    title = title_tags[0].strip()
     container = html.xpath("//div[@class='detail_left']")[0]
     cover = container.xpath("//a[@id='EnlargeImage']/@href")[0]
     # 有链接的女优和仅有文本的女优匹配方法不同，因此分别匹配以后合并列表
