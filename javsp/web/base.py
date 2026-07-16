@@ -6,10 +6,10 @@ import shutil
 import logging
 import requests
 import contextlib
-import cloudscraper
 import lxml.html
 from tqdm import tqdm
 from lxml import etree
+from curl_cffi import requests as curl_requests
 from lxml.html.clean import Cleaner
 from requests.models import Response
 
@@ -52,23 +52,10 @@ class Request():
             self.__post = requests.post
             self.__head = requests.head
         else:
-            self.scraper = cloudscraper.create_scraper()
-            self.__get = self._scraper_monitor(self.scraper.get)
-            self.__post = self._scraper_monitor(self.scraper.post)
-            self.__head = self._scraper_monitor(self.scraper.head)
-
-    def _scraper_monitor(self, func):
-        """监控cloudscraper的工作状态，遇到不支持的Challenge时尝试退回常规的requests请求"""
-        def wrapper(*args, **kw):
-            try:
-                return func(*args, **kw)
-            except Exception as e:
-                logger.debug(f"无法通过CloudFlare检测: '{e}', 尝试退回常规的requests请求")
-                if func == self.scraper.get:
-                    return requests.get(*args, **kw)
-                else:
-                    return requests.post(*args, **kw)
-        return wrapper
+            self.scraper = curl_requests.Session(impersonate="chrome")
+            self.__get = self.scraper.get
+            self.__post = self.scraper.post
+            self.__head = self.scraper.head
 
     def get(self, url, delay_raise=False):
         r = self.__get(url,
@@ -118,7 +105,7 @@ def request_get(url, cookies={}, timeout=None, delay_raise=False):
     """获取指定url的原始请求"""
     if timeout is None:
         timeout = Cfg().network.timeout.seconds
-    
+
     r = requests.get(url, headers=headers, proxies=read_proxy(), cookies=cookies, timeout=timeout)
     if not delay_raise:
         if r.status_code == 403 and b'>Just a moment...<' in r.content:
@@ -142,7 +129,7 @@ def get_resp_text(resp: Response, encoding=None):
     """提取Response的文本"""
     if encoding:
         resp.encoding = encoding
-    else:
+    elif hasattr(resp, 'apparent_encoding'):
         resp.encoding = resp.apparent_encoding
     return resp.text
 
@@ -211,10 +198,13 @@ def is_connectable(url, timeout=3):
 def urlretrieve(url, filename=None, reporthook=None, headers=None):
     if "arzon" in url:
         headers["Referer"] = "https://www.arzon.jp/"
+    if "jdbstatic" in url:
+        headers["Referer"] = "https://javdb.com/"
     """使用requests实现urlretrieve"""
     # https://blog.csdn.net/qq_38282706/article/details/80253447
     with contextlib.closing(requests.get(url, headers=headers,
                                          proxies=read_proxy(), stream=True)) as r:
+        r.raise_for_status()
         header = r.headers
         with open(filename, 'wb+') as fp:
             bs = 1024

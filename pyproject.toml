@@ -6,23 +6,28 @@ authors = ["Yuukiy <76897913+Yuukiy@users.noreply.github.com>"]
 license = "GPL-3.0-only"
 readme = "README.md"
 
+[[tool.poetry.source]]
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple/"
+priority = "primary"
+
 [tool.poetry-dynamic-versioning]
 enable = true
 vcs = "git"
 format = "v{base}.{distance}"
 
 [tool.poetry.dependencies]
-python = "<3.13,>=3.10"
-cloudscraper = "1.2.71"
+python = "<3.15,>=3.10"
+curl-cffi = "^0.15.0"
 colorama = "0.4.4"
-pillow = "10.2.0"
+pillow = "12.2.0"
 pretty-errors = "1.2.19"
-requests = "2.31.0"
-tqdm = "4.59.0"
+requests = "2.33.0"
+tqdm = "4.66.3"
 # https://stackoverflow.com/questions/446209/possible-values-from-sys-platform
-pywin32 = {version = "^306", markers = "sys_platform == 'win32'"}
-pywin32-ctypes = {version = "^0.2.2", markers = "sys_platform == 'win32'"}
-cryptography = "^42.0.5"
+pywin32 = { version = "^306", markers = "sys_platform == 'win32'" }
+pywin32-ctypes = { version = "^0.2.2", markers = "sys_platform == 'win32'" }
+cryptography = "46.0.7"
 pycryptodome = "^3.20.0"
 lxml = {extras = ["html-clean"], version = "^5.2.1"}
 confz = "^2.0.1"
@@ -33,12 +38,6 @@ slimeface = "^2024.9.27"
 [tool.poetry.scripts]
 javsp = "javsp.__main__:entry"
 server = "javsp.server:entry"
-
-[[tool.poetry.source]]
-name = "mirrors"
-url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
-priority = "primary"
-
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.1.1"
