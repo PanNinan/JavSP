@@ -48,7 +48,7 @@ MISSAV_HOST = "https://missav.ai"
 SEARCH_TEMPLATE = "https://missav.ai/ja/search/{keyword}"
 
 # ✅ 默认代理：改成你的实际代理地址；若不想用代理，留空字符串""即可
-DEFAULT_PROXY = "http://192.168.31.66:10808"  # ←←← 修改这里
+DEFAULT_PROXY = "http://127.0.0.1:7890"  # ←←← 修改这里
 
 # （暂时无效）如果你想优先使用系统环境变量代理，把下方开关设为 True
 USE_ENV_PROXY_IF_SET = True
